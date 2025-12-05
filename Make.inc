@@ -63,6 +63,10 @@ USE_SYSTEM_ZSTD:=0
 USE_SYSTEM_P7ZIP:=0
 USE_SYSTEM_LLD:=0
 
+# Link libjulia-internal with static libgcc and libstdc++
+USE_RT_STATIC_LIBGCC:=1
+USE_RT_STATIC_LIBSTDCXX:=1
+
 # Link to the LLVM shared library
 USE_LLVM_SHLIB := 1
 
@@ -99,6 +103,9 @@ WITH_APPLE_OSLOG := 0
 
 # Enable Timing Counts support
 WITH_TIMING_COUNTS := 0
+
+# Should --gc-sections/-dead_strip be used to remove unreferenced code?
+USE_LINKER_GC:=1
 
 # Prevent picking up $ARCH from the environment variables
 ARCH:=
@@ -821,7 +828,7 @@ SANITIZE_OPTS += -fsanitize=address
 SANITIZE_LDFLAGS += -fsanitize=address -shared-libasan
 endif
 ifeq ($(SANITIZE_THREAD),1)
-SANITIZE_OPTS += -fsanitize=thread
+SANITIZE_OPTS += -fsanitize=thread -fsanitize-ignorelist=$(JULIAHOME)/contrib/tsan/ignorelist.txt
 SANITIZE_LDFLAGS += -fsanitize=thread
 ifneq ($(CROSS_BOOTSTRAP_JULIA),)
 bootstrap_julia_flags += --target-sanitize=thread
@@ -942,6 +949,23 @@ endif
 ifeq ($(WITH_NVTX), 1)
 JCXXFLAGS += -DUSE_NVTX
 JCFLAGS += -DUSE_NVTX
+endif
+
+ifneq ($(findstring $(OS),WINNT FreeBSD OpenBSD),)
+  USE_LINKER_GC := 0
+  USE_RT_STATIC_LIBGCC := 0
+  USE_RT_STATIC_LIBSTDCXX := 0
+endif
+
+# Linker garbage collection
+ifeq ($(USE_LINKER_GC), 1)
+ifeq ($(OS), Darwin)
+  JLDFLAGS += -Wl,-dead_strip
+else
+  JLDFLAGS += -Wl,--gc-sections
+  JCFLAGS += -ffunction-sections -fdata-sections
+  JCXXFLAGS += -ffunction-sections -fdata-sections
+endif
 endif
 
 # ===========================================================================
@@ -1520,11 +1544,9 @@ RPATH_LIB := $(RPATH_ORIGIN)
 
 # --whole-archive
 ifeq ($(OS), Darwin)
-  WHOLE_ARCHIVE := -Xlinker -all_load
-  NO_WHOLE_ARCHIVE :=
+  whole_archive = -Xlinker -force_load $(1)
 else
-  WHOLE_ARCHIVE := -Wl,--whole-archive
-  NO_WHOLE_ARCHIVE := -Wl,--no-whole-archive
+  whole_archive = -Wl,--whole-archive $(1) -Wl,--no-whole-archive
 endif
 
 # Initialize these once, then add to them in OS-specific blocks
@@ -1570,8 +1592,7 @@ ifeq (,$(findstring aarch64,$(ARCH)))
 OSLIBS += -lgcc_s
 endif
 
-OSLIBS += -Wl,--export-dynamic -Wl,--version-script=$(BUILDROOT)/src/julia.expmap \
-	$(NO_WHOLE_ARCHIVE)
+OSLIBS += -Wl,--export-dynamic -Wl,--version-script=$(BUILDROOT)/src/julia.expmap -Wl,--no-whole-archive
 endif
 
 ifeq ($(OS), OpenBSD)
@@ -1590,8 +1611,6 @@ endif
 ifeq ($(OS), Darwin)
 SHLIB_EXT := dylib
 OSLIBS += -framework CoreFoundation
-WHOLE_ARCHIVE := -Xlinker -all_load
-NO_WHOLE_ARCHIVE :=
 HAVE_SSP := 1
 JLIBLDFLAGS += -Wl,-compatibility_version,$(SOMAJOR) -Wl,-current_version,$(JULIA_MAJOR_VERSION).$(JULIA_MINOR_VERSION).$(JULIA_PATCH_VERSION)
 endif
@@ -1599,14 +1618,14 @@ endif
 ifeq ($(OS), WINNT)
 HAVE_SSP := 1
 OSLIBS += -Wl,--export-all-symbols -Wl,--version-script=$(BUILDROOT)/src/julia.expmap \
-	$(NO_WHOLE_ARCHIVE) -lpsapi -lkernel32 -lws2_32 -liphlpapi -lwinmm -ldbghelp -luserenv -lsecur32 -latomic -lole32
+	-Wl,--no-whole-archive -lpsapi -lkernel32 -lws2_32 -liphlpapi -lwinmm -ldbghelp -luserenv -lsecur32 -latomic -lole32
 # N.B.: Unlike in the sysimage, we cannot -Wl,--disable-auto-import -Wl,--disable-runtime-pseudo-reloc here, because libstdc++/LLVM are not fully correct under
 # enforced visibility at this point.
 JLDFLAGS += -Wl,--stack,8388608
 ifeq ($(ARCH),i686)
 JLDFLAGS += -Wl,--large-address-aware
 endif
-JCPPFLAGS += -D_WIN32_WINNT=_WIN32_WINNT_WIN8
+JCPPFLAGS += -D_WIN32_WINNT=0x0602 # (0x0602 = _WIN32_WINNT_WIN8)
 UNTRUSTED_SYSTEM_LIBM := 1
 # Use hard links for files on windows, rather than soft links
 #   https://stackoverflow.com/questions/3648819/how-to-make-a-symbolic-link-with-cygwin-in-windows-7
